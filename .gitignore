@@ -1,0 +1,21 @@
+# Local secrets and deployment configs
+/.env
+/.env.*
+!/.env.example
+!/.env.sample
+/config.php
+/config.local.php
+/config.local.*.php
+/web-config.php
+/site-*.php
+/shop-*.php
+/private-configs/
+
+# Generated SQLite audit databases and sidecar files
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+
+# Local logs
+*.log
