@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 const CLI_SCRIPT = __DIR__ . DIRECTORY_SEPARATOR . 'cleanup-cli.php';
-const PRIVATE_CONFIG_PATH = ''; // Set to an absolute PHP config path outside the web root.
+const PRIVATE_CONFIG_PATH = ''; // Set to an absolute .env or PHP config path outside the web root.
 
 function h(string $value): string
 {
@@ -61,6 +61,121 @@ function requirePrivatePath(string $path, string $label): string
     return $path;
 }
 
+function isEnvFile(string $path): bool
+{
+    return strtolower(pathinfo($path, PATHINFO_EXTENSION)) === 'env'
+        || basename($path) === '.env';
+}
+
+function parseEnvFile(string $path): array
+{
+    $lines = file($path, FILE_IGNORE_NEW_LINES);
+    if ($lines === false) {
+        throw new RuntimeException("Could not read the private environment file: {$path}");
+    }
+    $values = [];
+    foreach ($lines as $lineNumber => $line) {
+        $line = trim($line);
+        if ($line === '' || str_starts_with($line, '#') || str_starts_with($line, ';')) {
+            continue;
+        }
+        if (str_starts_with($line, 'export ')) {
+            $line = substr($line, 7);
+        }
+        if (!preg_match('/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/', $line, $match)) {
+            throw new RuntimeException('Invalid .env syntax on line ' . ($lineNumber + 1) . '.');
+        }
+        $key = $match[1];
+        $value = trim($match[2]);
+        if (array_key_exists($key, $values)) {
+            throw new RuntimeException("Duplicate .env key: {$key}");
+        }
+        if ($value !== '' && ($value[0] === '"' || $value[0] === "'")) {
+            $quote = $value[0];
+            if (strlen($value) < 2 || substr($value, -1) !== $quote) {
+                throw new RuntimeException("Unclosed quote for .env key {$key}.");
+            }
+            $value = substr($value, 1, -1);
+            if ($quote === '"') {
+                $value = strtr($value, ['\\"' => '"', '\\\\' => '\\', '\\n' => "\n", '\\r' => "\r"]);
+            }
+        }
+        if (str_contains($value, "\0")) {
+            throw new RuntimeException("Invalid null byte in .env key {$key}.");
+        }
+        $values[$key] = $value;
+    }
+    return $values;
+}
+
+function siteConfigFromEnv(array $values, string $key): array
+{
+    $prefix = $key === '' ? 'VM4_' : 'VM4_SITE_' . $key . '_';
+    $required = [
+        'TABLE_PREFIX' => 'table_prefix',
+        'DB_DSN' => 'dsn',
+        'DB_USERNAME' => 'username',
+        'DB_PASSWORD' => 'password',
+        'AUDIT_DB' => 'audit_db',
+    ];
+    $config = [];
+    foreach ($required as $envName => $configName) {
+        $fullName = $prefix . $envName;
+        if (!array_key_exists($fullName, $values) || ($envName !== 'DB_PASSWORD' && $values[$fullName] === '')) {
+            throw new RuntimeException("Missing required .env value: {$fullName}");
+        }
+        $config[$configName] = $values[$fullName];
+    }
+    $roots = [];
+    foreach ($values as $envName => $value) {
+        if (preg_match('/^' . preg_quote($prefix, '/') . 'MEDIA_ROOT_([1-9][0-9]*)$/', $envName, $match)) {
+            $roots[(int)$match[1]] = $value;
+        }
+    }
+    ksort($roots, SORT_NUMERIC);
+    if ($roots === [] || in_array('', $roots, true)) {
+        throw new RuntimeException("Configure at least one {$prefix}MEDIA_ROOT_N path.");
+    }
+    $config['media_roots'] = array_values($roots);
+    return $config;
+}
+
+function appConfigFromEnv(array $values): array
+{
+    $password = (string)($values['VM4_WEB_PASSWORD'] ?? '');
+    if (strlen($password) < 16) {
+        throw new RuntimeException('Set VM4_WEB_PASSWORD to a unique password or password hash of at least 16 characters.');
+    }
+    $allowHttp = strtolower((string)($values['VM4_ALLOW_HTTP_LOCALHOST'] ?? 'false'));
+    if (!in_array($allowHttp, ['true', 'false'], true)) {
+        throw new RuntimeException('VM4_ALLOW_HTTP_LOCALHOST must be true or false.');
+    }
+    $sites = [];
+    foreach ($values as $envName => $label) {
+        if (!preg_match('/^VM4_SITE_([A-Z0-9_]+)_LABEL$/', $envName, $match)) {
+            continue;
+        }
+        $key = $match[1];
+        if (trim($label) === '') {
+            throw new RuntimeException("The .env site label for {$key} cannot be empty.");
+        }
+        foreach ($sites as $existingLabel => $_config) {
+            if ($existingLabel === $label) {
+                throw new RuntimeException("Duplicate site label in .env: {$label}");
+            }
+        }
+        $sites[$label] = siteConfigFromEnv($values, $key);
+    }
+    if ($sites === []) {
+        throw new RuntimeException('Add at least one VM4_SITE_<KEY>_LABEL and its database settings to the .env file.');
+    }
+    return [
+        'web_password' => $password,
+        'allow_http_localhost' => $allowHttp === 'true',
+        'web_sites' => $sites,
+    ];
+}
+
 function loadAppConfig(): array
 {
     $environmentPath = getenv('VM4_CLEANUP_CONFIG');
@@ -68,10 +183,12 @@ function loadAppConfig(): array
         ? $environmentPath
         : PRIVATE_CONFIG_PATH;
     if ($configPath === '' || !is_file($configPath) || !is_readable($configPath)) {
-        throw new RuntimeException('Set PRIVATE_CONFIG_PATH near the top of cleanup-web.php to a readable private PHP config file outside the web root.');
+        throw new RuntimeException('Set PRIVATE_CONFIG_PATH near the top of cleanup-web.php to a readable private .env or PHP config file outside the web root.');
     }
     requirePrivatePath($configPath, 'the combined config file');
-    $config = require $configPath;
+    $config = isEnvFile($configPath)
+        ? appConfigFromEnv(parseEnvFile($configPath))
+        : require $configPath;
     if (!is_array($config)) {
         throw new RuntimeException('The combined config file must return an array.');
     }
@@ -83,11 +200,17 @@ function loadAppConfig(): array
     if (!is_array($sites) || $sites === []) {
         throw new RuntimeException('The combined config must contain a non-empty web_sites map of labels to private site config paths.');
     }
-    foreach ($sites as $label => $configPath) {
-        if (!is_string($label) || trim($label) === '' || !is_string($configPath) || !is_file($configPath) || !is_readable($configPath)) {
-            throw new RuntimeException('Every site map entry must have a non-empty label and a readable PHP config path.');
+    foreach ($sites as $label => $siteConfig) {
+        if (!is_string($label) || trim($label) === '') {
+            throw new RuntimeException('Every site map entry must have a non-empty label.');
         }
-        requirePrivatePath($configPath, 'each site config');
+        if (is_array($siteConfig)) {
+            continue;
+        }
+        if (!is_string($siteConfig) || !is_file($siteConfig) || !is_readable($siteConfig)) {
+            throw new RuntimeException('Every site entry must contain settings or point to a readable private site config.');
+        }
+        requirePrivatePath($siteConfig, 'each site config');
     }
     return $config;
 }
@@ -97,7 +220,14 @@ function loadSiteConfig(array $sites, string $siteKey): array
     if (!array_key_exists($siteKey, $sites)) {
         throw new InvalidArgumentException('Select a valid configured site.');
     }
-    $config = require $sites[$siteKey];
+    $siteConfig = $sites[$siteKey];
+    if (is_array($siteConfig)) {
+        return $siteConfig;
+    }
+    requirePrivatePath($siteConfig, 'the selected site config');
+    $config = isEnvFile($siteConfig)
+        ? siteConfigFromEnv(parseEnvFile($siteConfig), '')
+        : require $siteConfig;
     if (!is_array($config)) {
         throw new RuntimeException("The selected site's config must return an array.");
     }

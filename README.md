@@ -1,6 +1,12 @@
 # VirtueMart 4 cleanup utility
 
-`cleanup-cli.php` is a standalone PHP CLI tool, and `cleanup-web.php` is a password-protected HTTPS page suitable for shared hosting. The web page runs the cleanup logic directly in PHP and does not require a terminal or `proc_open`. Both support one VirtueMart 4 site per config file. They can:
+`cleanup-cli.php` is a standalone PHP CLI tool, and `cleanup-web.php` is a password-protected HTTPS page suitable for shared hosting. The web page runs the cleanup logic directly in PHP and does not require a terminal or `proc_open`. The web page can load its settings from a private `.env` file; the CLI continues to use PHP config files.
+
+## IMPORTANT: CONFIG FILES HAVE DIFFERENT USES
+
+**`config.sample.php` is only for `cleanup-cli.php`.**
+
+**The shared-host web page uses `.env.sample` instead. You do not need `config.sample.php` for the web interface.**
 
 - Find product-image media rows that have no product association, and remove their local files/media records.
 - Delete products created before a supplied date, including their product price rows, manufacturer associations, category/shopper-group associations, custom-field values, and product-media associations.
@@ -24,7 +30,7 @@ Confirm the PHP version and PDO extensions in your hosting control panel. Use on
 
 ## Configure for multiple sites
 
-Copy `config.sample.php` to a private config for each site, such as `site-a.php` and `site-b.php`. Set each site's actual table prefix, DB connection, absolute media roots, and a distinct absolute SQLite audit path. For shared hosting, use the server's actual paths (often under `/home/<account>/...`), not the example paths. Keep configs and audit files outside `public_html`; do not put real credentials in the script or a publicly accessible folder.
+For CLI use, copy `config.sample.php` to a private PHP config for each site. For the web page, copy `.env.sample` to a private `.env` file. Set each site's actual table prefix, DB connection, absolute media roots, and a distinct absolute SQLite audit path. For shared hosting, use the server's actual paths (often under `/home/<account>/...`), not the example paths. Keep configs and audit files outside `public_html`; do not put real credentials in the script or a publicly accessible folder.
 
 `media_roots` must be absolute, existing directories. The cleanup utility will only resolve and delete local image paths inside those roots. URLs with schemes, traversal segments, missing files, or paths outside the allowed roots are not deleted. Add the Joomla root as an allowed root only when the site's stored media URLs require that path layout.
 
@@ -70,12 +76,14 @@ Keep the audit database private because product/media snapshots and paths may co
 ## Shared-host web page and SQLite viewer
 
 1. In your hosting control panel's File Manager, create a private folder outside `public_html`, for example `/home/your-account/private/vm4-cleanup/`.
-2. Copy `config.sample.php` into that private folder as `web-config.php`. Edit it with the host-provided database credentials and absolute paths. Set `web_password` to a unique password of at least 16 characters. Update every `web_sites` entry to an existing private site config; the first entry can point to `web-config.php` itself.
-3. In `cleanup-web.php`, set `PRIVATE_CONFIG_PATH` near the top to the absolute path of `web-config.php`, for example `/home/your-account/private/vm4-cleanup/web-config.php`. This is a PHP setting in the file; no shell or environment-variable access is needed. Leave `allow_http_localhost` set to `false` for hosting.
+2. Copy `.env.sample` into that private folder as `.env`. Edit it with the host-provided database credentials and absolute paths. Set `VM4_WEB_PASSWORD` to a unique password of at least 16 characters and update each `VM4_SITE_<KEY>_*` group for your websites.
+3. In `cleanup-web.php`, set `PRIVATE_CONFIG_PATH` near the top to the absolute path of `.env`, for example `/home/your-account/private/vm4-cleanup/.env`. This is a PHP setting in the file; no shell or environment-variable access is needed. Leave `VM4_ALLOW_HTTP_LOCALHOST=false` for hosting.
 4. Upload `cleanup-web.php` and `cleanup-cli.php` to a protected directory under `public_html`. Enable HTTPS for the site. Browse to `https://your-domain.example/cleanup-web.php`, sign in, choose a site and operation, then review the dry-run. Execution requires selecting **Execute** and typing `DELETE`.
 5. Select **SQLite audit** to see the configured SQLite file path, recent run summaries, and saved event snapshots. The database is created on the first run, including a dry-run. Its directory must exist, be writable by PHP, and remain outside `public_html`.
 
 The shared-host page includes `cleanup-cli.php` as a private code library and runs cleanup in the current PHP request. Direct web requests to `cleanup-cli.php` are rejected. Start with a small candidate limit because hosting providers may enforce request time limits. Do not use the page over plain HTTP or leave it publicly accessible without the password.
 
-For local development only, set `allow_http_localhost` to `true` in the private config, point `PRIVATE_CONFIG_PATH` in `cleanup-web.php` to that config, and open `http://127.0.0.1:8000/cleanup-web.php`. HTTP is still rejected for every non-loopback client. Set it back to `false` before deploying the config to shared hosting.
+For local development only, set `VM4_ALLOW_HTTP_LOCALHOST=true` in the private `.env`, point `PRIVATE_CONFIG_PATH` in `cleanup-web.php` to that file, and open `http://127.0.0.1:8000/cleanup-web.php`. HTTP is still rejected for every non-loopback client. Set it back to `false` before deploying the `.env` to shared hosting.
+
+The `.env` reader accepts `KEY=value` lines, optional matching single or double quotes, and full-line comments. It does not perform variable expansion. Use `VM4_SITE_<KEY>_LABEL`, `TABLE_PREFIX`, `DB_DSN`, `DB_USERNAME`, `DB_PASSWORD`, `AUDIT_DB`, and numbered `MEDIA_ROOT_1`, `MEDIA_ROOT_2`, etc. for each site group.
 # vm4_cleanup
